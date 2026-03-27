@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html lang="de" translate="no" class="notranslate">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="google" content="notranslate">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Scan&Replace">
+<meta name="theme-color" content="#111111">
+<title>Scan&amp;Replace</title>
+
+<!--
+  Scan&Replace v2.0.0
+  ────────────────────────────────────────────────────────
+  Barcode : nimiq/qr-scanner  – kontinuierlicher Live-Scan
+            aus dem Videostream via WebWorker. Kein Button-
+            Foto nötig – Code wird sofort erkannt sobald er
+            im Bild ist.
+  OCR     : Tesseract.js v5 – einmalig geladen, danach ~0.5s.
+            Wird per Button ausgelöst, nur für Art.-Nr.
+  PDF     : jsPDF 2.5 – 100×60 mm Etikett mit QR-Code.
+  Storage : localStorage – vollständig offline, kein Server.
+  Fehler  : Globaler Handler + Debug-Panel bei Problemen.
+  ────────────────────────────────────────────────────────
+-->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+
+<script type="module">
+  import QrScanner from 'https://cdn.jsdelivr.net/npm/qr-scanner@1.4.2/qr-scanner.min.js';
+  window.QrScanner = QrScanner;
+  document.dispatchEvent(new Event('qrscanner-ready'));
+</script>
+
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+:root{
+  --bg:#111;--surface:#1E1E1E;--surface2:#272727;--border:#333;
+  --red:#E31010;--red-dim:#4A0000;--text:#F0F0F0;--muted:#888;
+  --green:#22C55E;--green-dim:#0D2E0D;--amber:#F59E0B;
+  --mono:'Courier New',monospace;--safe-b:env(safe-area-inset-bottom,0px);--r:7px;
+}
+
+html,body{height:100%;background:var(--bg);color:var(--text);
+  font-family:'Helvetica Neue',Helvetica,sans-serif;overflow:hidden;
+  -webkit-tap-highlight-color:transparent}
+
+#app{display:flex;flex-direction:column;height:100dvh;max-width:600px;margin:0 auto}
+
+/* HEADER */
+header{background:#181818;border-bottom:1px solid var(--border);
+  padding:10px 14px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.hdr-icon{width:32px;height:32px;background:var(--red);border-radius:6px;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.hdr-icon svg{width:20px;height:20px}
+header h1{font-size:17px;font-weight:700;letter-spacing:.5px;color:#fff}
+.ver{margin-left:auto;background:var(--surface2);color:var(--muted);
+  font-size:10px;padding:2px 7px;border-radius:4px;font-family:var(--mono)}
+
+/* TABS */
+.tabs{display:flex;background:#181818;border-bottom:1px solid var(--border);flex-shrink:0}
+.tab{flex:1;padding:10px;text-align:center;font-size:12px;font-weight:600;
+  letter-spacing:.5px;color:var(--muted);cursor:pointer;
+  border-bottom:2px solid transparent;transition:all .2s;text-transform:uppercase}
+.tab.active{color:#fff;border-bottom-color:var(--red)}
+
+/* SCREENS */
+.screen{display:none;flex-direction:column;flex:1;overflow:hidden}
+.screen.active{display:flex}
+
+/* CAMERA */
+#cam-wrap{position:relative;width:100%;height:230px;background:#000;flex-shrink:0;overflow:hidden}
+#video{width:100%;height:100%;object-fit:cover;display:block}
+#overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+
+.scan-rect{width:270px;height:150px;border:2px solid rgba(255,255,255,.4);
+  border-radius:6px;position:relative;transition:border-color .3s}
+.scan-rect::before,.scan-rect::after{content:'';position:absolute;
+  width:22px;height:22px;border-color:var(--red);border-style:solid}
+.scan-rect::before{top:-2px;left:-2px;border-width:3px 0 0 3px;border-radius:4px 0 0 0}
+.scan-rect::after{bottom:-2px;right:-2px;border-width:0 3px 3px 0;border-radius:0 0 4px 0}
+
+.scan-line{position:absolute;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--red),transparent);
+  animation:sl 1.8s ease-in-out infinite;display:none}
+.scan-rect.live .scan-line{display:block}
+@keyframes sl{0%{top:0%}50%{top:98%}100%{top:0%}}
+
+.scan-rect.live  {border-color:rgba(255,255,255,.45)}
+.scan-rect.found {border-color:var(--green)}
+.scan-rect.ocring{border-color:var(--amber)}
+.scan-rect.err   {border-color:var(--red)}
+
+#cam-chip-wrap{position:absolute;bottom:8px;left:0;right:0;
+  display:flex;justify-content:center}
+.chip{font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;
+  backdrop-filter:blur(4px)}
+.chip.live  {background:rgba(0,0,0,.5);color:rgba(255,255,255,.7)}
+.chip.found {background:rgba(34,197,94,.25);color:var(--green);border:1px solid rgba(34,197,94,.4)}
+.chip.ocring{background:rgba(245,158,11,.2);color:var(--amber)}
+.chip.err   {background:rgba(227,16,16,.25);color:#ff7070}
+
+/* OCR PROGRESS */
+#ocr-prog{height:2px;background:var(--border);flex-shrink:0;overflow:hidden;display:none}
+#ocr-bar{height:100%;width:0%;background:var(--amber);transition:width .3s ease}
+
+/* FORM */
+.form{flex:1;overflow-y:auto;padding:10px 12px 0;display:flex;flex-direction:column;gap:8px}
+
+.banner{padding:8px 12px;border-radius:6px;font-size:12px;font-weight:600;
+  display:flex;align-items:center;gap:8px}
+.banner.hidden{display:none!important}
+.banner.ok  {background:var(--green-dim);border:1px solid #2a6b2a;color:var(--green)}
+.banner.err {background:var(--red-dim);border:1px solid var(--red);color:#ff7070}
+.banner.warn{background:#2a1f00;border:1px solid #a06000;color:var(--amber)}
+.banner svg{width:14px;height:14px;flex-shrink:0}
+
+.fgrp{display:flex;flex-direction:column;gap:3px}
+.flabel{font-size:11px;font-weight:600;letter-spacing:.5px;color:var(--muted);
+  text-transform:uppercase;display:flex;align-items:center;gap:5px}
+.flabel svg{width:13px;height:13px}
+.src{margin-left:auto;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700;letter-spacing:.3px}
+.src.barcode{background:rgba(34,197,94,.2);color:var(--green)}
+.src.ocr    {background:rgba(245,158,11,.2);color:var(--amber)}
+.src.manual {background:var(--surface2);color:var(--muted)}
+.src.none   {background:transparent;color:#444}
+
+input[type=text],textarea{width:100%;background:var(--surface);border:1px solid var(--border);
+  border-radius:6px;color:var(--text);font-family:var(--mono);font-size:15px;
+  padding:9px 11px;outline:none;transition:border-color .2s;letter-spacing:.5px}
+input[type=text]:focus{border-color:#555}
+input.from-bc {border-color:rgba(34,197,94,.5)}
+input.from-ocr{border-color:rgba(245,158,11,.4)}
+textarea{font-size:11px;color:var(--muted);resize:none;height:40px;line-height:1.4}
+
+/* SLIDER */
+.sl-wrap{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px 8px}
+.sl-hdr{display:flex;align-items:center;margin-bottom:6px}
+.sl-label{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.sl-val{margin-left:auto;font-size:18px;font-weight:700;color:#fff;font-family:var(--mono)}
+input[type=range]{-webkit-appearance:none;width:100%;height:4px;background:var(--border);
+  border-radius:2px;outline:none;margin-bottom:4px}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;
+  background:var(--red);border-radius:50%;cursor:pointer;box-shadow:0 0 0 3px rgba(227,16,16,.25)}
+.sl-ticks{display:flex;justify-content:space-between;padding:0 1px}
+.sl-ticks span{font-size:9px;color:var(--border);font-family:var(--mono)}
+.sl-ticks span.active{color:var(--red);font-weight:700}
+
+/* DEBUG */
+#dbg{display:none;background:#0a0a0a;border:1px solid #333;border-radius:6px;
+  padding:8px 10px;font-family:var(--mono);font-size:10px;color:#555;
+  max-height:80px;overflow-y:auto}
+#dbg.on{display:block}
+.dl{margin-bottom:2px}.dl.ok{color:#4ade80}.dl.err{color:#f87171}.dl.warn{color:var(--amber)}
+
+/* BUTTONS */
+.btn-area{padding:10px 12px;padding-bottom:calc(12px + var(--safe-b));
+  display:flex;flex-direction:column;gap:8px;flex-shrink:0;
+  background:var(--bg);border-top:1px solid var(--border)}
+.btn{width:100%;height:52px;border:none;border-radius:var(--r);font-size:15px;
+  font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#fff;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;
+  transition:opacity .15s,transform .1s;-webkit-tap-highlight-color:transparent}
+.btn:active{transform:scale(.98);opacity:.88}
+.btn svg{width:20px;height:20px;flex-shrink:0}
+.btn-ocr{background:var(--red)}
+.btn-ocr:disabled{background:#5a0000;color:rgba(255,255,255,.3);cursor:not-allowed;transform:none}
+.btn-print{background:var(--red)}
+.btn-print:disabled{background:var(--surface2);color:var(--muted);cursor:not-allowed;transform:none}
+
+.spin{width:18px;height:18px;border:2px solid rgba(255,255,255,.25);
+  border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;flex-shrink:0}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* HISTORY */
+.hist-bar{display:flex;align-items:center;padding:8px 12px;
+  border-bottom:1px solid var(--border);gap:8px;flex-shrink:0}
+.hist-cnt{font-size:12px;color:var(--muted)}
+.btn-clr{margin-left:auto;background:none;border:1px solid var(--border);border-radius:5px;
+  color:var(--muted);font-size:11px;padding:5px 10px;cursor:pointer;
+  font-weight:600;letter-spacing:.5px;text-transform:uppercase}
+.hist-area{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.hist-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  flex:1;gap:10px;color:var(--border)}
+.hist-empty svg{width:56px;height:56px}
+.hist-empty p{font-size:14px}
+.hcard{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
+  padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+.hc-top{display:flex;align-items:flex-start;gap:8px}
+.hc-ico{width:34px;height:34px;background:var(--surface2);border-radius:5px;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--muted)}
+.hc-ico svg{width:18px;height:18px}
+.hc-main{flex:1;min-width:0}
+.hc-art{font-family:var(--mono);font-size:14px;font-weight:700;color:#fff;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hc-lot{font-size:12px;color:var(--muted);font-family:var(--mono)}
+.hc-meta{display:flex;align-items:center;justify-content:space-between;margin-top:2px}
+.hc-ts{font-size:10px;color:#555}
+.hc-qty{font-size:11px;font-weight:700;color:var(--red);font-family:var(--mono)}
+.hc-acts{display:flex;gap:6px}
+.hc-btn{background:var(--surface2);border:1px solid var(--border);border-radius:5px;
+  color:var(--muted);font-size:11px;padding:4px 10px;cursor:pointer;font-weight:600}
+.hc-btn:active{opacity:.7}
+</style>
+</head>
+<body>
+<div id="app">
+
+<header>
+  <div class="hdr-icon">
+    <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round">
+      <rect x="3" y="3" width="7" height="7" rx="1"/>
+      <rect x="14" y="3" width="7" height="7" rx="1"/>
+      <rect x="3" y="14" width="7" height="7" rx="1"/>
+      <path d="M14 14h3v3M17 20h3M20 17v3"/>
+    </svg>
+  </div>
+  <h1>Scan&amp;Replace</h1>
+  <span class="ver">v2.0.0</span>
+</header>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('scan')">📷 Scan</div>
+  <div class="tab" onclick="switchTab('history')">📋 Verlauf</div>
+</div>
+
+<!-- ═══════ SCAN SCREEN ═══════ -->
+<div class="screen active" id="screen-scan">
+
+  <div id="cam-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="overlay">
+      <div class="scan-rect live" id="scan-rect">
+        <div class="scan-line"></div>
+      </div>
+    </div>
+    <div id="cam-chip-wrap">
+      <div class="chip live" id="chip">Kamera wird geladen…</div>
+    </div>
+  </div>
+
+  <div id="ocr-prog"><div id="ocr-bar"></div></div>
+
+  <div class="form">
+
+    <div class="banner hidden" id="banner">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="ban-icon">
+        <circle cx="12" cy="12" r="10"/>
+      </svg>
+      <span id="ban-txt"></span>
+    </div>
+
+    <!-- Art.-Nr. -->
+    <div class="fgrp">
+      <div class="flabel">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M20 7H4a2 2 0 00-2 2v6a2 2 0 002 2h16a2 2 0 002-2V9a2 2 0 00-2-2z"/>
+          <path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/>
+        </svg>
+        Art.-Nr.: (OCR)
+        <span class="src none" id="src-art">—</span>
+      </div>
+      <input type="text" id="f-art" placeholder="000 - 0000 - 000"
+             autocomplete="off" spellcheck="false">
+    </div>
+
+    <!-- LOT -->
+    <div class="fgrp">
+      <div class="flabel">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"/>
+        </svg>
+        LOT
+        <span class="src none" id="src-lot">—</span>
+      </div>
+      <input type="text" id="f-lot" placeholder="z.B. 08082025A"
+             autocomplete="off" spellcheck="false">
+    </div>
+
+    <!-- Rohdaten -->
+    <div class="fgrp" id="raw-wrap" style="display:none">
+      <div class="flabel">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="4" width="20" height="16" rx="2"/>
+          <path d="M7 8v8M11 8v8M15 8v8"/>
+        </svg>
+        Rohdaten (Barcode)
+      </div>
+      <textarea id="f-raw" readonly></textarea>
+    </div>
+
+    <!-- Menge -->
+    <div class="sl-wrap">
+      <div class="sl-hdr">
+        <span class="sl-label">📦 Menge</span>
+        <span class="sl-val" id="qty-val">1</span>
+      </div>
+      <input type="range" id="qty" min="1" max="10" value="1">
+      <div class="sl-ticks" id="ticks"></div>
+    </div>
+
+    <div id="dbg"></div>
+
+  </div><!-- /form -->
+
+  <div class="btn-area">
+    <button class="btn btn-ocr" id="btn-ocr" onclick="runOcr()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <path d="M4 7V4h3M17 4h3v3M21 17v3h-3M7 21H4v-3"/>
+        <rect x="7" y="7" width="10" height="10" rx="1"/>
+      </svg>
+      ART.-NR. SCANNEN (OCR)
+    </button>
+    <button class="btn btn-print" id="btn-print" onclick="printLabel()" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/>
+        <rect x="6" y="14" width="12" height="8" rx="1"/>
+      </svg>
+      DRUCKEN
+    </button>
+  </div>
+
+</div><!-- /scan -->
+
+<!-- ═══════ HISTORY SCREEN ═══════ -->
+<div class="screen" id="screen-history">
+  <div class="hist-bar">
+    <span class="hist-cnt" id="h-cnt">0 Einträge</span>
+    <button class="btn-clr" onclick="clearHist()">Leeren</button>
+  </div>
+  <div class="hist-area" id="h-area">
+    <div class="hist-empty" id="h-empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+      </svg>
+      <p>Noch keine Scans</p>
+    </div>
+  </div>
+</div>
+
+</div><!-- /app -->
+
+<div id="qr-canvas" style="position:absolute;left:-9999px;top:-9999px;"></div>
+
+<script>
+'use strict';
+// ══════════════════════════════════════════════════════════
+//  Scan&Replace v2.0.0
+//  Live-Barcode-Scan: nimiq/qr-scanner (WebWorker)
+//  OCR on-demand:     Tesseract.js v5
+//  PDF:               jsPDF 2.5  (100×60 mm)
+//  Storage:           localStorage (offline)
+// ══════════════════════════════════════════════════════════
+
+// ── Konstanten ─────────────────────────────────────────────
+const ART_REGEX  = /\d{3}\s*[-–]\s*\d{4}\s*[-–]\s*\d{3}/;
+const LOT_REGEX  = /\b(\d{10}[A-Z0-9])\b/i;
+const KW_REGEX   = /(?:LOT|Ch\.-?B\.|Charge|Batch|Losnummer)\s*[:\-]?\s*([A-Z0-9]{4,14})/i;
+const MAX_HIST   = 200;
+
+// ── State ──────────────────────────────────────────────────
+const S = {
+  scanner:    null,   // QrScanner-Instanz
+  ocrWorker:  null,
+  ocrReady:   false,
+  ocrBusy:    false,
+  printing:   false,
+  lastCode:   '',
+  lastCodeTs: 0,
+  src:        { art: null, lot: null },
+  hist:       [],
+};
+
+// ── DOM ────────────────────────────────────────────────────
+const D = {
+  video:    document.getElementById('video'),
+  rect:     document.getElementById('scan-rect'),
+  chip:     document.getElementById('chip'),
+  prog:     document.getElementById('ocr-prog'),
+  bar:      document.getElementById('ocr-bar'),
+  banner:   document.getElementById('banner'),
+  banIcon:  document.getElementById('ban-icon'),
+  banTxt:   document.getElementById('ban-txt'),
+  fArt:     document.getElementById('f-art'),
+  fLot:     document.getElementById('f-lot'),
+  fRaw:     document.getElementById('f-raw'),
+  rawWrap:  document.getElementById('raw-wrap'),
+  srcArt:   document.getElementById('src-art'),
+  srcLot:   document.getElementById('src-lot'),
+  qty:      document.getElementById('qty'),
+  qtyVal:   document.getElementById('qty-val'),
+  ticks:    document.getElementById('ticks'),
+  btnOcr:   document.getElementById('btn-ocr'),
+  btnPrint: document.getElementById('btn-print'),
+  dbg:      document.getElementById('dbg'),
+};
+
+// ── Debug-Logger ───────────────────────────────────────────
+const log = (() => {
+  const lines = [];
+  function write(cls, msg) {
+    const t = new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    lines.push({ cls, msg:`[${t}] ${msg}` });
+    if (lines.length > 40) lines.shift();
+    const hasErr = lines.some(l => l.cls === 'err');
+    D.dbg.className = hasErr ? 'on' : '';
+    D.dbg.innerHTML = lines.map(l =>
+      `<div class="dl ${l.cls}">${l.msg.replace(/</g,'&lt;')}</div>`
+    ).join('');
+    D.dbg.scrollTop = D.dbg.scrollHeight;
+  }
+  return {
+    info: m => { console.log('[SR]',m);     write('',m);    },
+    ok:   m => { console.log('[SR✓]',m);    write('ok',m);  },
+    warn: m => { console.warn('[SR⚠]',m);  write('warn',m); },
+    err:  m => { console.error('[SR✗]',m); write('err',m);  },
+  };
+})();
+
+// ── Status-Banner ──────────────────────────────────────────
+let _banTimer;
+function showBanner(msg, type='ok') {
+  clearTimeout(_banTimer);
+  D.banner.className = `banner ${type}`;
+  D.banTxt.textContent = msg;
+  D.banIcon.innerHTML = type === 'ok'
+    ? '<circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/>'
+    : '<circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/>';
+  _banTimer = setTimeout(() => D.banner.classList.add('hidden'), 5000);
+  log[type === 'ok' ? 'ok' : type === 'warn' ? 'warn' : 'err'](msg);
+}
+
+// ── Kamera-Chip ────────────────────────────────────────────
+function setChip(cls, txt) {
+  D.chip.className = `chip ${cls}`;
+  D.chip.textContent = txt;
+  D.rect.className  = `scan-rect ${cls}`;
+}
+
+// ── Tabs ───────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab,.screen').forEach(e => e.classList.remove('active'));
+  document.querySelector(`.tab[onclick*="${name}"]`).classList.add('active');
+  document.getElementById(`screen-${name}`).classList.add('active');
+  if (name === 'history') renderHist();
+}
+
+// ── Slider ─────────────────────────────────────────────────
+for (let i=1;i<=10;i++) {
+  const s = document.createElement('span');
+  s.textContent = i; s.dataset.n = i;
+  D.ticks.appendChild(s);
+}
+D.ticks.firstElementChild.classList.add('active');
+
+D.qty.addEventListener('input', function() {
+  D.qtyVal.textContent = this.value;
+  D.ticks.querySelectorAll('span').forEach(s =>
+    s.classList.toggle('active', s.dataset.n == this.value));
+  updatePrint();
+});
+
+// ── Felder ─────────────────────────────────────────────────
+[D.fArt, D.fLot].forEach(el => el.addEventListener('input', () => {
+  const f = el === D.fArt ? 'art' : 'lot';
+  S.src[f] = 'manual';
+  setBadge(f, 'manual');
+  updatePrint();
+}));
+
+function setBadge(field, src) {
+  const el    = field === 'art' ? D.srcArt : D.srcLot;
+  const finp  = field === 'art' ? D.fArt   : D.fLot;
+  const labels = { barcode:'BARCODE', ocr:'OCR', manual:'MANUELL', null:'—' };
+  el.textContent = labels[src] || '—';
+  el.className   = `src ${src || 'none'}`;
+  finp.className = src==='barcode' ? 'from-bc' : src==='ocr' ? 'from-ocr' : '';
+}
+
+function updatePrint() {
+  D.btnPrint.disabled = !(D.fArt.value.trim() && D.fLot.value.trim());
+}
+
+function clearFields() {
+  D.fArt.value=''; D.fLot.value=''; D.fRaw.value='';
+  D.rawWrap.style.display='none';
+  S.src={art:null,lot:null};
+  setBadge('art',null); setBadge('lot',null);
+  D.banner.classList.add('hidden');
+  updatePrint();
+}
+
+// ── GS1 Parser ─────────────────────────────────────────────
+function parseLotFromBarcode(raw) {
+  if (!raw) return null;
+  // Steuerzeichen entfernen
+  let s = raw.replace(/^\]d\d/i,'').replace(/^\]C\d/i,'').replace(/\x1d/g,'').trim();
+
+  // (10)XXXXX mit Klammern
+  const brk = s.match(/\(10\)([A-Z0-9]+)/i);
+  if (brk) { log.ok('LOT via (10): '+brk[1]); return brk[1]; }
+
+  // Ohne Klammern – bereinigen
+  const c = s.replace(/[^0-9A-Za-z]/g,'').toUpperCase();
+
+  if (c.length >= 26 && c.slice(0,2)==='01') {
+    // Standard-GS1: AI17 bei 16, AI10 bei 24
+    if (c.slice(16,18)==='17' && c.slice(24,26)==='10') {
+      log.ok('LOT via GS1 Pos26: '+c.slice(26));
+      return c.slice(26);
+    }
+    // Flexibel: AI10 im Bereich 20-32
+    for (let i=20; i<=Math.min(32,c.length-3); i++) {
+      if (c.slice(i,i+2)==='10') {
+        const cand = c.slice(i+2);
+        if (/^[A-Z0-9]{4,14}$/.test(cand)) {
+          log.ok(`LOT via AI10@${i}: ${cand}`);
+          return cand;
+        }
+      }
+    }
+  }
+
+  // Fallback: letzter alphanumerischer Block
+  const blocks = [...c.matchAll(/[A-Z0-9]{6,14}/g)];
+  if (blocks.length) { log.warn('LOT via Fallback: '+blocks[blocks.length-1][0]); return blocks[blocks.length-1][0]; }
+  log.warn('LOT nicht gefunden in: '+raw.slice(0,50));
+  return null;
+}
+
+function parseArtNr(text) {
+  const m = (text||'').match(ART_REGEX);
+  if (!m) return null;
+  const d = m[0].replace(/[^\d]/g,'');
+  return d.length===10 ? `${d.slice(0,3)} - ${d.slice(3,7)} - ${d.slice(7)}` : m[0].trim();
+}
+
+function parseLotFromOcr(text) {
+  const kw = (text||'').match(KW_REGEX);
+  if (kw) return kw[1];
+  const p = (text||'').match(LOT_REGEX);
+  return p ? p[1] : null;
+}
+
+// ── Live-Barcode-Scanner ────────────────────────────────────
+async function initScanner() {
+  // Warten bis ESM-Modul geladen
+  if (!window.QrScanner) {
+    log.info('Warte auf qr-scanner…');
+    await new Promise((res, rej) => {
+      const t = setTimeout(() => rej(new Error('qr-scanner Timeout (8s)')), 8000);
+      document.addEventListener('qrscanner-ready', () => { clearTimeout(t); res(); }, {once:true});
+    });
+  }
+
+  // Kamera verfügbar?
+  const hasCam = await QrScanner.hasCamera().catch(() => false);
+  if (!hasCam) {
+    setChip('err', 'Keine Kamera'); showBanner('Keine Kamera gefunden', 'err'); return;
+  }
+
+  try {
+    S.scanner = new QrScanner(D.video, r => onCode(r.data ?? r), {
+      preferredCamera:          'environment',
+      highlightScanRegion:      false,
+      highlightCodeOutline:     false,
+      maxScansPerSecond:        5,
+      returnDetailedScanResult: true,
+    });
+    await S.scanner.start();
+    setChip('live', 'Live-Scan aktiv');
+    log.ok('qr-scanner gestartet');
+  } catch(e) {
+    log.err('qr-scanner: '+e.message);
+    setChip('err', 'Scanner-Fehler');
+    showBanner('Scanner-Fehler – Kamera wird direkt geöffnet', 'warn');
+    initVideoOnly();
+  }
+}
+
+function onCode(raw) {
+  if (!raw) return;
+  const now = Date.now();
+  if (raw === S.lastCode && now - S.lastCodeTs < 3000) return; // Duplikat
+  S.lastCode = raw; S.lastCodeTs = now;
+  log.ok('Barcode: '+raw.slice(0,60));
+
+  D.fRaw.value = raw;
+  D.rawWrap.style.display = '';
+
+  const lot = parseLotFromBarcode(raw);
+  if (lot) {
+    D.fLot.value = lot;
+    S.src.lot = 'barcode';
+    setBadge('lot','barcode');
+    setChip('found','✓ LOT erkannt');
+    if (navigator.vibrate) navigator.vibrate(60);
+  } else {
+    setChip('found','Code gelesen – kein LOT');
+    showBanner('Barcode gelesen – LOT-Format nicht erkannt', 'warn');
+  }
+  updatePrint();
+  setTimeout(() => { if(D.rect.classList.contains('found')) setChip('live','Live-Scan aktiv'); }, 2000);
+}
+
+async function initVideoOnly() {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+    D.video.srcObject = s;
+    setChip('live','Kamera aktiv');
+    log.warn('Video-Only Fallback aktiv');
+  } catch(e) {
+    log.err('getUserMedia: '+e.message);
+    setChip('err','Kamera verweigert');
+    showBanner('Kamerazugriff verweigert – Berechtigung prüfen', 'err');
+  }
+}
+
+// ── OCR Worker ──────────────────────────────────────────────
+async function getOcrWorker() {
+  if (S.ocrWorker && S.ocrReady) return S.ocrWorker;
+  log.info('Tesseract wird geladen…');
+  const w = await Tesseract.createWorker('deu', 1, {
+    logger: m => {
+      if (m.status === 'recognizing text') {
+        D.bar.style.width = Math.round((m.progress||0)*100) + '%';
+      }
+    }
+  });
+  await w.setParameters({
+    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz -–.',
+    tessedit_pageseg_mode:   '6',
+  });
+  S.ocrWorker = w; S.ocrReady = true;
+  log.ok('Tesseract bereit');
+  return w;
+}
+
+function preprocessCanvas(src) {
+  const c = document.createElement('canvas');
+  c.width = src.width; c.height = src.height;
+  const ctx = c.getContext('2d');
+  ctx.filter = 'grayscale(1) contrast(1.7) brightness(1.1)';
+  ctx.drawImage(src, 0, 0);
+  ctx.filter = 'none';
+  return c;
+}
+
+async function runOcr() {
+  if (S.ocrBusy) return;
+
+  clearFields();
+  S.ocrBusy = true;
+  setChip('ocring','OCR läuft…');
+  D.btnOcr.disabled = true;
+  D.btnOcr.innerHTML = '<div class="spin"></div> OCR LÄUFT…';
+  D.prog.style.display = 'block';
+  D.bar.style.width = '5%';
+
+  try {
+    // Frame aufnehmen
+    if (!D.video.videoWidth) throw new Error('Kamera noch nicht bereit');
+    const frame = document.createElement('canvas');
+    frame.width  = D.video.videoWidth;
+    frame.height = D.video.videoHeight;
+    frame.getContext('2d').drawImage(D.video,0,0);
+    log.info(`Frame: ${frame.width}×${frame.height}`);
+
+    D.bar.style.width = '20%';
+    const proc = preprocessCanvas(frame);
+
+    // Worker laden
+    const w = await getOcrWorker().catch(e => { throw new Error('OCR-Engine: '+e.message); });
+    D.bar.style.width = '40%';
+
+    // Erkennen
+    const res = await w.recognize(proc).catch(e => { throw new Error('OCR-Lauf: '+e.message); });
+    const txt = res.data?.text || '';
+    log.info(`OCR: ${txt.length} Zeichen – „${txt.slice(0,60).replace(/\n/g,' ')}"`);
+    D.bar.style.width = '85%';
+
+    // Art.-Nr.
+    const art = parseArtNr(txt);
+    if (art) {
+      D.fArt.value = art;
+      S.src.art = 'ocr';
+      setBadge('art','ocr');
+      log.ok('Art.-Nr.: '+art);
+    } else {
+      log.warn('Art.-Nr. nicht gefunden (Regex: '+ART_REGEX.source+')');
+    }
+
+    // LOT-Fallback falls Barcode-LOT fehlt
+    if (!D.fLot.value.trim()) {
+      const lot = parseLotFromOcr(txt);
+      if (lot) {
+        D.fLot.value = lot;
+        S.src.lot = 'ocr';
+        setBadge('lot','ocr');
+        log.ok('LOT via OCR: '+lot);
+      }
+    }
+
+    D.bar.style.width = '100%';
+    updatePrint();
+
+    if (art) {
+      showBanner('Art.-Nr. erkannt: '+art, 'ok');
+      if (navigator.vibrate) navigator.vibrate(80);
+    } else if (D.fLot.value.trim()) {
+      showBanner('LOT erkannt – Art.-Nr. nicht gefunden', 'warn');
+    } else {
+      showBanner('Kein Text erkannt – Etikett schärfer positionieren', 'warn');
+    }
+
+  } catch(e) {
+    log.err('OCR: '+e.message);
+    showBanner(e.message, 'err');
+  } finally {
+    S.ocrBusy = false;
+    setChip('live','Live-Scan aktiv');
+    D.btnOcr.disabled = false;
+    D.btnOcr.innerHTML =
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <path d="M4 7V4h3M17 4h3v3M21 17v3h-3M7 21H4v-3"/>
+        <rect x="7" y="7" width="10" height="10" rx="1"/>
+      </svg>ART.-NR. SCANNEN (OCR)`;
+    setTimeout(() => { D.prog.style.display='none'; D.bar.style.width='0%'; }, 900);
+  }
+}
+
+// ── QR-Code für PDF ─────────────────────────────────────────
+function makeQrUrl(text) {
+  return new Promise((res,rej) => {
+    const div = document.getElementById('qr-canvas');
+    div.innerHTML = '';
+    try {
+      new QRCode(div, {text, width:220, height:220,
+        colorDark:'#000', colorLight:'#fff', correctLevel:QRCode.CorrectLevel.M});
+      setTimeout(() => {
+        const el = div.querySelector('img') || div.querySelector('canvas');
+        if (!el) { rej(new Error('QR-Render leer')); return; }
+        res(el.tagName==='IMG' ? el.src : el.toDataURL());
+      }, 280);
+    } catch(e){ rej(e); }
+  });
+}
+
+// ── PDF 100×60 mm ───────────────────────────────────────────
+async function buildPdf(art, lot, qty) {
+  if (!window.jspdf) throw new Error('jsPDF nicht geladen');
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF({orientation:'landscape', unit:'mm', format:[100,60]});
+
+  pdf.setFillColor(255,255,255);
+  pdf.rect(0,0,100,60,'F');
+
+  pdf.setFont('helvetica','bold'); pdf.setFontSize(18); pdf.setTextColor(0);
+  pdf.text(art, 5, 14);
+
+  pdf.setDrawColor(200); pdf.setLineWidth(0.4);
+  pdf.line(5,17,95,17);
+
+  pdf.setFontSize(11);
+  pdf.setFont('helvetica','bold');  pdf.text('LOT:',      5,  25);
+  pdf.setFont('helvetica','normal');pdf.text(String(lot), 20, 25);
+  pdf.setFont('helvetica','bold');  pdf.text('Quantity:', 5,  33);
+  pdf.setFont('helvetica','normal');pdf.text(String(qty), 26, 33);
+
+  try {
+    const url = await makeQrUrl(`${art};${lot};${qty}`);
+    pdf.addImage(url,'PNG',63,22,32,32);
+    pdf.setFontSize(6); pdf.setTextColor(150); pdf.setFont('helvetica','normal');
+    pdf.text('Art.-Nr. | LOT | Menge', 63, 57);
+    pdf.setTextColor(0);
+  } catch(e) { log.warn('QR-Code: '+e.message); }
+
+  return pdf;
+}
+
+// ── Drucken ─────────────────────────────────────────────────
+async function printLabel() {
+  if (S.printing) return;
+
+  const art = D.fArt.value.trim();
+  const lot = D.fLot.value.trim();
+  const qty = parseInt(D.qty.value) || 1;
+
+  if (!art) { showBanner('Art.-Nr. fehlt', 'err'); return; }
+  if (!lot) { showBanner('LOT fehlt', 'err'); return; }
+  if (qty<1||qty>10) { showBanner('Ungültige Menge', 'err'); return; }
+
+  S.printing = true;
+  D.btnPrint.disabled = true;
+  D.btnPrint.innerHTML = '<div class="spin"></div> ERSTELLE PDF…';
+
+  try {
+    log.info(`PDF: ${art} / ${lot} / ${qty}`);
+    const pdf  = await buildPdf(art, lot, qty);
+    const blob = pdf.output('blob');
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `Etikett_${lot.replace(/[^A-Z0-9]/gi,'_')}.pdf`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 12000);
+
+    // History
+    const entry = {id:Date.now(), artNr:art, lot, qty, ts:new Date().toISOString()};
+    S.hist.unshift(entry);
+    if (S.hist.length>MAX_HIST) S.hist.length=MAX_HIST;
+    try { localStorage.setItem('sr_hist', JSON.stringify(S.hist)); }
+    catch(e) { log.warn('localStorage: '+e.message); }
+
+    showBanner('Etikett erstellt & gespeichert ✓', 'ok');
+    if (navigator.vibrate) navigator.vibrate([60,40,60]);
+    log.ok(`Gespeichert: ${art} / ${lot}`);
+
+    // Felder zurücksetzen
+    clearFields();
+    D.qty.value='1'; D.qtyVal.textContent='1';
+    D.ticks.querySelectorAll('span').forEach((s,i)=>s.classList.toggle('active',i===0));
+
+  } catch(e) {
+    log.err('Druck: '+e.message);
+    showBanner('PDF-Fehler: '+e.message, 'err');
+  } finally {
+    S.printing = false;
+    D.btnPrint.innerHTML =
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/>
+        <rect x="6" y="14" width="12" height="8" rx="1"/>
+      </svg>DRUCKEN`;
+    updatePrint();
+  }
+}
+
+// ── History ─────────────────────────────────────────────────
+function renderHist() {
+  const area  = document.getElementById('h-area');
+  const empty = document.getElementById('h-empty');
+  document.getElementById('h-cnt').textContent =
+    `${S.hist.length} Eintrag${S.hist.length!==1?'e':''}`;
+  area.querySelectorAll('.hcard').forEach(c=>c.remove());
+
+  if (!S.hist.length) { empty.style.display='flex'; return; }
+  empty.style.display='none';
+
+  S.hist.forEach(e => {
+    const d  = new Date(e.ts);
+    const ts = d.toLocaleDateString('de-DE')+' '+
+               d.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
+    const card = document.createElement('div');
+    card.className='hcard';
+    card.innerHTML=`
+      <div class="hc-top">
+        <div class="hc-ico">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="3" y="3" width="7" height="7" rx="1"/>
+            <rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/>
+            <path d="M14 14h3v3M17 20h3M20 17v3"/>
+          </svg>
+        </div>
+        <div class="hc-main">
+          <div class="hc-art"></div>
+          <div class="hc-lot"></div>
+        </div>
+      </div>
+      <div class="hc-meta">
+        <span class="hc-ts">${ts}</span>
+        <span class="hc-qty">${e.qty}</span>
+      </div>
+      <div class="hc-acts">
+        <button class="hc-btn" data-id="${e.id}" data-a="print">🖨 Drucken</button>
+        <button class="hc-btn" data-id="${e.id}" data-a="del">🗑 Löschen</button>
+      </div>`;
+    // XSS-sicher: textContent für Nutzerdaten
+    card.querySelector('.hc-art').textContent = e.artNr;
+    card.querySelector('.hc-lot').textContent = 'LOT: '+e.lot;
+    area.appendChild(card);
+  });
+
+  area.onclick = ev => {
+    const btn = ev.target.closest('.hc-btn');
+    if (!btn) return;
+    const id = parseInt(btn.dataset.id);
+    if (btn.dataset.a==='print') reprintEntry(id);
+    if (btn.dataset.a==='del')   delEntry(id);
+  };
+}
+
+async function reprintEntry(id) {
+  const e = S.hist.find(h=>h.id===id);
+  if (!e) { log.err('Eintrag nicht gefunden: '+id); return; }
+  try {
+    const pdf = await buildPdf(e.artNr, e.lot, e.qty);
+    const url = URL.createObjectURL(pdf.output('blob'));
+    const a   = document.createElement('a');
+    a.href=url; a.download=`Etikett_${e.lot}.pdf`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url),12000);
+    showBanner('Nachdruck erstellt ✓','ok');
+    switchTab('scan');
+  } catch(er) { log.err('Nachdruck: '+er.message); showBanner('Fehler: '+er.message,'err'); }
+}
+
+function delEntry(id) {
+  S.hist = S.hist.filter(h=>h.id!==id);
+  try { localStorage.setItem('sr_hist',JSON.stringify(S.hist)); } catch(_){}
+  renderHist();
+}
+
+function clearHist() {
+  if (!confirm('Verlauf unwiderruflich löschen?')) return;
+  S.hist=[];
+  try { localStorage.removeItem('sr_hist'); } catch(_){}
+  renderHist();
+}
+
+// ── Globale Fehlerbehandlung ────────────────────────────────
+window.addEventListener('unhandledrejection', e =>
+  log.err('Promise: '+(e.reason?.message||String(e.reason))));
+window.addEventListener('error', e =>
+  log.err(`JS: ${e.message} (${(e.filename||'').split('/').pop()}:${e.lineno})`));
+
+// ── Boot ────────────────────────────────────────────────────
+(function boot() {
+  // History laden
+  try {
+    const raw = localStorage.getItem('sr_hist');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        S.hist = parsed.slice(0, MAX_HIST);
+        log.ok('History: '+S.hist.length+' Einträge');
+      }
+    }
+  } catch(e) {
+    log.warn('History-Load: '+e.message);
+    try { localStorage.removeItem('sr_hist'); } catch(_){}
+  }
+
+  // Live-Scanner starten
+  initScanner().catch(e => {
+    log.err('initScanner: '+e.message);
+    setChip('err','Scanner-Fehler');
+  });
+
+  // Tesseract vorladen (Background, nach 2.5s – kein Blocking)
+  setTimeout(() => {
+    getOcrWorker().catch(e => log.warn('OCR-Warmup: '+e.message));
+  }, 2500);
+
+  log.ok('Scan&Replace v2.0.0 bereit');
+})();
+</script>
+
+</body>
+</html>
